@@ -11,6 +11,104 @@ A lightweight, embeddable chatbot widget that answers questions using only the c
 - 🧩 **Framework agnostic**: Works on WordPress, Shopify, static HTML, or any CMS that allows adding a script tag.
 - 🎨 **Customisable UI**: CSS variables and runtime configuration control brand colours, greeting text, button positioning, default open state and more.
 
+## OpenAI configuration and the SiteIndexer
+
+### Supplying your OpenAI credentials
+
+ChatPress defers to OpenAI’s Responses API to turn ranked snippets into a conversational answer. Because the widget runs entirely in the browser, you must place the OpenAI key and model on a secure server-side worker (for example a Cloudflare Worker, Vercel Edge Function, or a WordPress REST handler) and never expose the key to the client bundle.
+
+1. Set the following environment variables where your proxy code runs:
+
+   ```bash
+   CHATPRESS_OPENAI_API_KEY=sk-...
+   CHATPRESS_OPENAI_MODEL=gpt-4o-mini
+   ```
+
+2. Forward the user’s prompt plus any supporting snippets to `https://api.openai.com/v1/responses`, using the model named in `CHATPRESS_OPENAI_MODEL`. A minimal Node/Edge example:
+
+   ```js
+   const apiKey = process.env.CHATPRESS_OPENAI_API_KEY;
+   const model = process.env.CHATPRESS_OPENAI_MODEL || 'gpt-4o-mini';
+
+   export default async function handler(request) {
+     const body = await request.json();
+     const response = await fetch('https://api.openai.com/v1/responses', {
+       method: 'POST',
+       headers: {
+         'Authorization': `Bearer ${apiKey}`,
+         'Content-Type': 'application/json'
+       },
+       body: JSON.stringify({
+         model,
+         input: body.prompt,
+         temperature: 0,
+         max_output_tokens: 700,
+         metadata: { source: 'chatpress' }
+       })
+     });
+     return new Response(await response.text(), { status: response.status });
+   }
+   ```
+
+3. Point the widget at that proxy by declaring the endpoint before the script loads:
+
+   ```html
+   <script>
+     window.ChatPressConfig = {
+       searchEndpoint: '/api/chatpress-answer',
+       searchMethod: 'POST',
+       searchResultsPath: 'data.results'
+     };
+   </script>
+   <script src="/path/to/chatpress-widget.js" defer></script>
+   ```
+
+   The proxy should respond with an object shaped like `{ data: { results: [{ title, url, snippet }] } }`, where the `snippet` field contains the generated answer and each result links back to the source material you supplied to the model.
+
+### Answer generation policy
+
+The default system prompt sent by ChatPress to OpenAI insists that the model:
+
+- writes all replies in British English,
+- bases every sentence on the passages passed in from the widget’s index or search providers, and
+- declines to answer if the supplied snippets do not contain the requested facts.
+
+This keeps responses grounded in your own content and prevents the model from hallucinating external knowledge.
+
+### Understanding the SiteIndexer
+
+Each page embeds a lightweight SiteIndexer (implemented as the `LocalIndexer` in the bundle) that scans visible DOM regions, deduplicates sections, and keeps them up to date with a `MutationObserver`. For broader coverage you can run the SiteIndexer as a background job that fetches extra URLs and injects them into your proxy response.
+
+- **Sitemaps:** Provide absolute sitemap URLs so the indexer can crawl every canonical page. A JSON configuration consumed by your worker may look like:
+
+  ```json
+  {
+    "origin": "https://example.com",
+    "sitemaps": [
+      "https://example.com/wp-sitemap.xml",
+      { "url": "https://example.com/docs-sitemap.xml", "frequency": "hourly" }
+    ]
+  }
+  ```
+
+- **REST sources:** Supply structured endpoints (for example a WordPress REST collection) when crawling a sitemap is not enough. Each source should return an array of objects that include title, URL, and raw content fields:
+
+  ```json
+  {
+    "restSources": [
+      {
+        "label": "Knowledge base",
+        "url": "https://example.com/wp-json/wp/v2/pages?per_page=100&_fields=title.rendered,link,content.rendered",
+        "titlePath": "title.rendered",
+        "urlPath": "link",
+        "contentPath": "content.rendered"
+      }
+    ]
+  }
+  ```
+
+Store this configuration alongside your proxy so it can assemble the snippets that are forwarded to OpenAI. When the worker refreshes its cache (for instance on a schedule or in response to a webhook) the widget continues to use the same `/api/chatpress-answer` endpoint and automatically benefits from the expanded corpus.
+
 ## 1. Embed the widget
 
 Host `dist/chatpress-widget.js` on your CDN (or upload to your CMS) and include it on every page where you want the assistant to be available:
@@ -158,6 +256,32 @@ The plugin:
 - Enqueues `chatpress-widget.js` (served from the plugin’s `assets/` directory) on the frontend.
 - Localises default options via `window.ChatPressConfig`.
 - Registers a `[chatpress_widget]` shortcode so you can control where the script loads.
+
+### WordPress configuration notes
+
+- **Entering the API key:** Define `CHATPRESS_OPENAI_API_KEY` and (optionally) `CHATPRESS_OPENAI_MODEL` in `wp-config.php` or your hosting control panel so the values remain server-side. Create a small mu-plugin or theme snippet that registers a REST endpoint (for example `/wp-json/chatpress/v1/query`) which reads those constants and proxies requests to the OpenAI Responses API as shown above. Finally, hook into `chatpress_widget_default_config` to set `searchEndpoint` to that REST route so the browser posts questions to your secure proxy instead of holding the secret itself.
+
+- **Enabling site-wide indexing:** The plugin auto-enqueues the widget on every public page through the `chatpress_widget_auto_enqueue` filter, which keeps the built-in SiteIndexer aware of new posts and pages. If you are running the background crawler, expose your sitemap or REST collections to it directly from WordPress:
+
+  ```php
+  add_filter('chatpress_widget_default_config', function ($defaults) {
+      $defaults['siteIndexer'] = array(
+          'sitemaps'    => array(home_url('/wp-sitemap.xml')),
+          'restSources' => array(
+              array(
+                  'label'      => 'Pages',
+                  'url'        => rest_url('wp/v2/pages?per_page=100&_fields=title.rendered,link,content.rendered'),
+                  'titlePath'  => 'title.rendered',
+                  'urlPath'    => 'link',
+                  'contentPath'=> 'content.rendered',
+              ),
+          ),
+      );
+      return $defaults;
+  });
+  ```
+
+  With this filter in place the worker can fetch the sitemap and REST payloads directly from your site, ensuring that every published entry is available to the chatbot without manually embedding additional markup.
 
 Example shortcode usage inside a post or template:
 
