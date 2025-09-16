@@ -24,7 +24,10 @@
     searchLabel: 'site search',
     observeDom: true,
     indexSelectors: null,
-    minSectionLength: 80
+    minSectionLength: 80,
+    openAIEndpoint: null,
+    openAIModel: null,
+    openAIKey: null
   };
 
   var currentScript = document.currentScript;
@@ -95,6 +98,9 @@
     if (dataset.searchUrlPath) config.searchUrlPath = dataset.searchUrlPath;
     if (dataset.searchSnippetPath) config.searchSnippetPath = dataset.searchSnippetPath;
     if (dataset.searchLabel) config.searchLabel = dataset.searchLabel;
+    if (dataset.openAiEndpoint) config.openAIEndpoint = dataset.openAiEndpoint;
+    if (dataset.openAiModel) config.openAIModel = dataset.openAiModel;
+    if (dataset.openAiKey) config.openAIKey = dataset.openAiKey;
 
     var defaultOpen = parseBoolean(dataset.defaultOpen);
     if (typeof defaultOpen !== 'undefined') {
@@ -605,27 +611,249 @@
     this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
   };
 
+  ChatPressWidgetApp.prototype.isOpenAIConfigured = function () {
+    return !!(this.config.openAIEndpoint && this.config.openAIModel && this.config.openAIKey);
+  };
+
+  ChatPressWidgetApp.prototype.buildContext = function (query, searchResult) {
+    var trimmedQuery = (query || '').trim();
+    if (!trimmedQuery) {
+      return '';
+    }
+
+    var pieces = [];
+    var seen = {};
+    var maxEntries = 8;
+
+    function normalizeSnippet(text) {
+      var cleaned = cleanWhitespace(stripHTML(text || ''));
+      if (cleaned.length > 600) {
+        cleaned = cleaned.slice(0, 600) + '…';
+      }
+      return cleaned;
+    }
+
+    function normalizeTitle(text) {
+      return cleanWhitespace(stripHTML(text || ''));
+    }
+
+    function addPiece(title, snippet, url) {
+      if (pieces.length >= maxEntries) {
+        return;
+      }
+      var cleanTitle = normalizeTitle(title);
+      var cleanSnippet = normalizeSnippet(snippet);
+      var entryParts = [];
+      if (cleanTitle) {
+        entryParts.push('Title: ' + cleanTitle);
+      }
+      if (url) {
+        entryParts.push('URL: ' + url);
+      }
+      if (cleanSnippet) {
+        entryParts.push('Snippet: ' + cleanSnippet);
+      }
+      if (!entryParts.length) {
+        return;
+      }
+      var key = entryParts.join('|');
+      if (seen[key]) {
+        return;
+      }
+      seen[key] = true;
+      pieces.push(entryParts.join('\n'));
+    }
+
+    if (searchResult && Array.isArray(searchResult.results)) {
+      for (var i = 0; i < searchResult.results.length; i += 1) {
+        var resultItem = searchResult.results[i];
+        if (!resultItem) {
+          continue;
+        }
+        addPiece(resultItem.title, resultItem.snippet, resultItem.url);
+        if (pieces.length >= maxEntries) {
+          break;
+        }
+      }
+    }
+
+    if (pieces.length < maxEntries && this.indexer && typeof this.indexer.search === 'function') {
+      var additionalLimit = Math.max((this.config.maxResults || 3) * 2, maxEntries);
+      var additionalResults = [];
+      try {
+        additionalResults = this.indexer.search(trimmedQuery, additionalLimit) || [];
+      } catch (err) {
+        console.warn('[ChatPress] Failed to collect local context', err);
+      }
+      if (additionalResults && additionalResults.length) {
+        for (var j = 0; j < additionalResults.length; j += 1) {
+          var localItem = additionalResults[j];
+          if (!localItem) {
+            continue;
+          }
+          addPiece(localItem.title, localItem.snippet, localItem.url);
+          if (pieces.length >= maxEntries) {
+            break;
+          }
+        }
+      }
+    }
+
+    if (!pieces.length) {
+      return '';
+    }
+
+    var context = pieces.join('\n\n');
+    if (context.length > 6000) {
+      context = context.slice(0, 6000) + '…';
+    }
+    return context;
+  };
+
+  ChatPressWidgetApp.prototype.requestOpenAICompletion = function (query, context) {
+    if (!this.isOpenAIConfigured()) {
+      return Promise.resolve('');
+    }
+
+    var endpoint = this.config.openAIEndpoint;
+    var model = this.config.openAIModel;
+    var apiKey = this.config.openAIKey;
+    var payload = {
+      model: model,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a helpful site assistant. Reply in British English using only the supplied context.'
+        },
+        {
+          role: 'user',
+          content: 'Context:\n' + context + '\n\nQuestion: ' + query + '\n\nUse only the context provided. If the context does not contain the answer, reply that you do not know based on the site content.'
+        }
+      ]
+    };
+
+    return fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + apiKey
+      },
+      body: JSON.stringify(payload)
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          var error = new Error('OpenAI request failed with status ' + response.status);
+          error.status = response.status;
+          throw error;
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data) {
+          return '';
+        }
+        var choices = data.choices;
+        if (!choices || !choices.length) {
+          return '';
+        }
+        var firstChoice = choices[0] || {};
+        var messageContent = '';
+        if (firstChoice.message && typeof firstChoice.message.content !== 'undefined') {
+          messageContent = firstChoice.message.content;
+        } else if (typeof firstChoice.text === 'string') {
+          messageContent = firstChoice.text;
+        }
+        if (Array.isArray(messageContent)) {
+          var buffer = '';
+          for (var i = 0; i < messageContent.length; i += 1) {
+            var part = messageContent[i];
+            if (!part) {
+              continue;
+            }
+            if (typeof part === 'string') {
+              buffer += part;
+            } else if (typeof part.text === 'string') {
+              buffer += part.text;
+            } else if (part.type === 'text' && typeof part.value === 'string') {
+              buffer += part.value;
+            }
+          }
+          messageContent = buffer;
+        }
+        if (typeof messageContent !== 'string') {
+          return '';
+        }
+        return messageContent.trim();
+      });
+  };
+
   ChatPressWidgetApp.prototype.handleQuery = function (query) {
     var waitingMessage = this.addBotMessage('Looking for relevant information…');
     waitingMessage.message.classList.add('chatpress-message-loading');
     var self = this;
-    this.searchManager.search(query).then(function (result) {
-      if (result && result.results && result.results.length) {
-        var fragment = self.renderResults(result.results, result.provider, result.providerName);
-        self.updateMessage(waitingMessage, { html: true, fragment: fragment });
-      } else {
+    this.searchManager.search(query)
+      .then(function (result) {
+        var fallback = function (prefaceText, emptyText) {
+          if (result && result.results && result.results.length) {
+            var fragment = self.renderResults(result.results, result.provider, result.providerName);
+            if (prefaceText) {
+              var combined = document.createDocumentFragment();
+              var note = document.createElement('p');
+              note.textContent = prefaceText;
+              combined.appendChild(note);
+              combined.appendChild(fragment);
+              self.updateMessage(waitingMessage, { html: true, fragment: combined });
+            } else {
+              self.updateMessage(waitingMessage, { html: true, fragment: fragment });
+            }
+          } else {
+            self.updateMessage(waitingMessage, {
+              html: false,
+              content: emptyText || 'I could not find information related to that query on this site.'
+            });
+          }
+        };
+
+        if (!self.isOpenAIConfigured()) {
+          fallback();
+          return;
+        }
+
+        var trimmedQuery = (query || '').trim();
+        if (!trimmedQuery) {
+          fallback();
+          return;
+        }
+
+        var context = self.buildContext(trimmedQuery, result);
+        if (!context) {
+          fallback();
+          return;
+        }
+
+        self.requestOpenAICompletion(trimmedQuery, context)
+          .then(function (answer) {
+            if (answer) {
+              self.updateMessage(waitingMessage, { html: false, content: answer });
+            } else {
+              fallback();
+            }
+          })
+          .catch(function (error) {
+            console.warn('[ChatPress] OpenAI request failed', error);
+            fallback(
+              'I had trouble generating an answer just now, but here are some pages that might help:',
+              'I had trouble generating an answer just now. Please try again in a moment.'
+            );
+          });
+      })
+      .catch(function (error) {
+        console.warn('[ChatPress] Search failed', error);
         self.updateMessage(waitingMessage, {
           html: false,
-          content: 'I could not find information related to that query on this site.'
+          content: 'Something went wrong while searching. Please try again.'
         });
-      }
-    }).catch(function (error) {
-      console.warn('[ChatPress] Search failed', error);
-      self.updateMessage(waitingMessage, {
-        html: false,
-        content: 'Something went wrong while searching. Please try again.'
       });
-    });
   };
 
   ChatPressWidgetApp.prototype.renderResults = function (results, providerLabel, providerName) {

@@ -69,9 +69,28 @@ Available widget options:
 | `searchUrlPath` | `string` | `'url'` | Dot-notation path to each result permalink. |
 | `searchSnippetPath` | `string` | `'snippet'` | Dot-notation path to each result summary/excerpt. |
 | `searchLabel` | `string` | `'site search'` | Label shown when results come from the custom endpoint. |
+| `openAIEndpoint` | `string` | `null` | HTTPS endpoint for the OpenAI-compatible chat completions API. |
+| `openAIModel` | `string` | `null` | Model identifier sent to the chat completions API (e.g. `gpt-4o-mini`). |
+| `openAIKey` | `string` | `null` | API key forwarded as a Bearer token when calling the completions endpoint. |
 | `indexSelectors` | `string[]` | Auto-detected | Optional selector override for DOM indexing. |
 | `observeDom` | `boolean` | `true` | Re-index automatically when the DOM changes. |
 | `minSectionLength` | `number` | `80` | Minimum characters required for a section to be indexed. |
+
+#### Using OpenAI-powered answers
+
+Provide values for `openAIEndpoint`, `openAIModel`, and `openAIKey` to let the widget call an OpenAI-compatible Chat Completions API. The assistant will collect the top search snippets and local index excerpts, send them as context with the fixed system prompt _“You are a helpful site assistant. Reply in British English using only the supplied context.”_, and replace the loading message with the returned completion.
+
+```html
+<script>
+  window.ChatPressConfig = {
+    openAIEndpoint: 'https://api.openai.com/v1/chat/completions',
+    openAIModel: 'gpt-4o-mini',
+    openAIKey: 'sk-your-api-key',
+  };
+</script>
+```
+
+> **Security tip:** Browsers expose any in-page API key. Proxy OpenAI requests through your own backend when deploying to production sites.
 
 ## 2. Search provider integration
 
