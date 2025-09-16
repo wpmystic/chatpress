@@ -275,6 +275,17 @@ The plugin:
 - Enqueues `chatpress-widget.js` (served from the plugin’s `assets/` directory) on the frontend.
 - Localises default options via `window.ChatPressConfig`.
 - Registers a `[chatpress_widget]` shortcode so you can control where the script loads.
+- Adds a **Settings → ChatPress Widget** screen to store your OpenAI API key, sitemap/REST endpoint and default model.
+
+### Configuring the plugin
+
+After activating the plugin, visit **Settings → ChatPress Widget** and complete the fields:
+
+1. **OpenAI API key** – required for the ChatPress assistant to make API calls.
+2. **Sitemap / REST URL** – optional URL that points to a sitemap or JSON search endpoint used for additional grounding context.
+3. **OpenAI model** – defaults to `gpt-4o-mini`; override if your account uses a different model name.
+
+These settings are exposed to the frontend via `window.ChatPressConfig` so the widget can authenticate and fetch supplemental content. You can still override any option at runtime via filters, shortcodes or the global `ChatPressConfig` object if needed.
 
 ### WordPress configuration notes
 
